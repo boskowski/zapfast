@@ -12706,6 +12706,50 @@ mod receipt_tests {
         );
     }
 
+    /// A create notice never brings back a group deleted after it, nor
+    /// moves an existing chat's activity back in time.
+    #[tokio::test]
+    async fn created_group_notice_respects_removal_and_newer_activity() {
+        use whatsapp_rust::wacore::stanza::groups::GroupNotificationAction;
+        use whatsapp_rust::wacore_binary::Node;
+        let notice = |group: &str, at: i64| {
+            wa_events::Event::GroupUpdate(
+                wa_events::GroupUpdate::builder()
+                    .group_jid(group.parse().unwrap())
+                    .timestamp(whatsapp_rust::wacore::time::from_secs(at).unwrap())
+                    .is_lid_addressing_mode(false)
+                    .action(Box::new(GroupNotificationAction::Create {
+                        raw: Node::default(),
+                    }))
+                    .build(),
+            )
+        };
+        let (mut worker, _events, _inbox, _wa) = worker();
+
+        let deleted = "123-111@g.us";
+        worker.archive.ensure_chat(deleted, "Deleted").unwrap();
+        worker
+            .archive
+            .remove_chat_through(deleted, 200, true)
+            .unwrap();
+        assert!(worker.archive.chat(deleted).unwrap().is_none());
+        worker.handle_wa_event(Arc::new(notice(deleted, 150))).await;
+        assert!(
+            worker.archive.chat(deleted).unwrap().is_none(),
+            "a notice older than the deletion does not refile the chat"
+        );
+
+        let active = "123-222@g.us";
+        worker.archive.ensure_chat(active, "Active").unwrap();
+        worker.archive.touch_activity(active, 500).unwrap();
+        worker.handle_wa_event(Arc::new(notice(active, 300))).await;
+        assert_eq!(
+            worker.archive.chat(active).unwrap().unwrap().last_activity,
+            500,
+            "an older notice never moves activity back"
+        );
+    }
+
     fn errors(events: &std::sync::mpsc::Receiver<Event>) -> Vec<String> {
         events
             .try_iter()
